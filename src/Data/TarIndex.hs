@@ -9,6 +9,7 @@ module Data.TarIndex (
       
     lookup,
     construct,
+    constructIO,
     index,
 
     putTarIndex,
@@ -24,6 +25,7 @@ import Prelude hiding (lookup)
 import qualified Codec.Archive.Tar as Tar
 import qualified Codec.Archive.Tar.Entry as Tar
 import Control.Applicative
+import Control.Exception (evaluate)
 import Data.Binary
 import qualified Data.ByteString.Lazy as BS
 import qualified Data.ByteString.Lazy.Util as BS
@@ -140,8 +142,32 @@ lookup (TarIndex pathTable pathTrie) path =
       TarDir [ fromComponentIds pathTable [entry]
              | entry <- entries ]
 
+-- | Construct a tar-index for a file on disk.
+-- Failure is indicated by throwing an error.
+constructIO :: FilePath -> IO TarIndex
+constructIO file = do
+  tar <- BS.readFile file
+  let entries = Tar.read tar
+  case extractInfo entries of
+    info -> evaluate (construct info)
+
+-- | Fails in IO!
+extractInfo :: Tar.Entries -> [(FilePath, Int)]
+extractInfo = go 0 []
+  where
+    go _ es' (Tar.Done)      = es'
+    go _ _   (Tar.Fail err)  = error err
+    go n es' (Tar.Next e es) = go n' ((Tar.entryPath e, n) : es') es
+      where
+        n' = n + 1
+               + case Tar.entryContent e of
+                   Tar.NormalFile     _   size -> blocks size
+                   Tar.OtherEntryType _ _ size -> blocks size
+                   _                           -> 0
+        blocks s = 1 + ((fromIntegral s - 1) `div` 512)
+
 -- | Construct a 'TarIndex' from a list of filepaths and their corresponding
---
+-- offset within the tar-file
 construct :: [(FilePath, TarEntryOffset)] -> TarIndex
 construct pathsOffsets = TarIndex pathTable pathTrie
   where
