@@ -30,11 +30,11 @@ import qualified Data.Bits as Bits
 import Data.List hiding (lookup)
 import Data.Function (on)
 import Data.Typeable (Typeable)
-import Data.Word (Word16)
+import Data.Word (Word16, Word32)
 
 -- | A compact mapping from sequences of small ints to small ints.
 --
-newtype (Enum k, Enum v) => IntTrie k v = IntTrie (A.UArray Word16 Word16)
+newtype (Enum k, Enum v) => IntTrie k v = IntTrie (A.UArray Word32 Word32)
     deriving (Show, Typeable)
 
 getTrie :: (Enum k, Enum v) => B.Get (IntTrie k v)
@@ -136,10 +136,10 @@ test1 = example2 == mkTrie example1
 -- Each node is a pair of arrays, one of keys and one of Either value pointer.
 -- We need to distinguish values from internal pointers. We use a tag bit:
 --
-tagLeaf, tagNode, untag :: Word16 -> Word16
+tagLeaf, tagNode, untag :: Word32 -> Word32
 tagLeaf = id
-tagNode = flip Bits.setBit   15
-untag   = flip Bits.clearBit 15
+tagNode = flip Bits.setBit   31
+untag   = flip Bits.clearBit 31
 
 -- So the overall array form of the above trie is:
 --
@@ -186,7 +186,7 @@ tests = test1 && test2 && test3
 construct :: (Ord k, Enum k, Enum v) => [([k], v)] -> IntTrie k v
 construct = IntTrie . mkArray . flattenTrie . mkTrie
 
-mkArray :: [Word16] -> A.UArray Word16 Word16
+mkArray :: [Word32] -> A.UArray Word32 Word32
 mkArray xs = A.listArray (0, fromIntegral (length xs) - 1) xs
 
 
@@ -199,7 +199,7 @@ data TrieLookup k v = Entry !v | Completions [k] deriving Show
 lookup :: (Enum k, Enum v) => IntTrie k v -> [k] -> Maybe (TrieLookup k v)
 lookup (IntTrie arr) = fmap convertLookup . go 0 . convertKey
   where
-    go :: Word16 -> [Word16] -> Maybe (TrieLookup Word16 Word16)
+    go :: Word32 -> [Word32] -> Maybe (TrieLookup Word32 Word32)
     go nodeOff []     = Just (completions nodeOff)
     go nodeOff (k:ks) = case search nodeOff (tagLeaf k) of
       Just entryOff
@@ -217,14 +217,14 @@ lookup (IntTrie arr) = fmap convertLookup . go 0 . convertKey
         keysStart = nodeOff + 1
         keysEnd   = nodeOff + nodeSize
 
-    search :: Word16 -> Word16 -> Maybe Word16
+    search :: Word32 -> Word32 -> Maybe Word32
     search nodeOff key = fmap (+nodeSize) (bsearch keysStart keysEnd key)
       where
         nodeSize  = arr ! nodeOff
         keysStart = nodeOff + 1
         keysEnd   = nodeOff + nodeSize
 
-    bsearch :: Word16 -> Word16 -> Word16 -> Maybe Word16
+    bsearch :: Word32 -> Word32 -> Word32 -> Maybe Word32
     bsearch a b key
       | a > b     = Nothing
       | otherwise = case compare key (arr ! mid) of
@@ -234,16 +234,16 @@ lookup (IntTrie arr) = fmap convertLookup . go 0 . convertKey
       where mid = (a + b) `div` 2
 
 
-convertKey :: Enum k => [k] -> [Word16]
+convertKey :: Enum k => [k] -> [Word32]
 convertKey = map (fromIntegral . fromEnum)
 
-convertLookup :: (Enum k, Enum v) => TrieLookup Word16 Word16
+convertLookup :: (Enum k, Enum v) => TrieLookup Word32 Word32
                                   -> TrieLookup k v
-convertLookup (Entry v)        = Entry       (word16ToEnum v)
-convertLookup (Completions ks) = Completions (map word16ToEnum ks)
+convertLookup (Entry v)        = Entry       (word32ToEnum v)
+convertLookup (Completions ks) = Completions (map word32ToEnum ks)
 
-word16ToEnum :: Enum n => Word16 -> n
-word16ToEnum = toEnum . fromIntegral
+word32ToEnum :: Enum n => Word32 -> n
+word32ToEnum = toEnum . fromIntegral
 
 
 -------------------------
@@ -299,19 +299,19 @@ mkTrie = unfoldTrie (fmap split) . split
             []    -> Leaf k0 v0
             ksvs' -> Node k0 ksvs'
 
-type Offset = Int
+type Offset = Word32
 
 -- This is a breadth-first traversal. We keep a list of the tries that we are
 -- to write out next. Each of these have an offset allocated to them at the
 -- time we put them into the list. We keep a running offset so we know where
 -- to allocate next.
 --
-flattenTrie :: (Enum k, Enum v) => Trie k v -> [Word16]
+flattenTrie :: (Enum k, Enum v) => Trie k v -> [Word32]
 flattenTrie trie = go [trie] (size trie)
   where
-    size (Trie tns) = 1 + 2 * length tns
+    size (Trie tns) = 1 + 2 * genericLength tns
 
-    go :: (Enum k, Enum v) => [Trie k v] -> Offset -> [Word16]
+    go :: (Enum k, Enum v) => [Trie k v] -> Offset -> [Word32]
     go []                  _      = []
     go (Trie tnodes:tries) offset = flat ++ go (tries++tries') offset'
       where
@@ -325,14 +325,14 @@ flattenTrie trie = go [trie] (size trie)
       Leaf k v -> doNodes off            (leafKV k v  :kvs)    ts'  tns
       Node k t -> doNodes (off + size t) (nodeKV k off:kvs) (t:ts') tns
 
-    leafKV k v = (tagLeaf (enum2Word16 k), enum2Word16 v)
-    nodeKV k o = (tagNode (enum2Word16 k), int2Word16  o)
+    leafKV k v = (tagLeaf (enum2Word32 k), enum2Word32 v)
+    nodeKV k o = (tagNode (enum2Word32 k), id  o)
 
-int2Word16 :: Int -> Word16
-int2Word16 = fromIntegral
+int2Word32 :: Int -> Word32
+int2Word32 = fromIntegral
 
-enum2Word16 :: Enum n => n -> Word16
-enum2Word16 = int2Word16 . fromEnum
+enum2Word32 :: Enum n => n -> Word32
+enum2Word32 = int2Word32 . fromEnum
 
 
 -------------------------

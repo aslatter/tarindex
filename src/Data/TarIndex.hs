@@ -11,6 +11,7 @@ module Data.TarIndex (
     construct,
     constructIO,
     index,
+    indexFile,
 
     putTarIndex,
     getTarIndex,
@@ -27,8 +28,9 @@ import qualified Codec.Archive.Tar.Entry as Tar
 import Control.Applicative
 import Control.Exception (evaluate)
 import Data.Binary
-import qualified Data.ByteString.Lazy as BS
-import qualified Data.ByteString.Lazy.Util as BS
+import qualified Data.ByteString.Lazy as BSL
+import qualified Data.ByteString.Lazy.Util as BSL
+import qualified Data.ByteString as BS
 import Data.Typeable (Typeable)
 import Data.Version (showVersion)
 import System.IO
@@ -68,6 +70,8 @@ data TarIndex = TarIndex
   !(IntTrie PathComponentId TarEntryOffset)
   deriving (Show, Typeable)
 
+-- | An entry in the index is either the offset for the
+-- requested file or a sub-directory listing.
 data TarIndexEntry = TarFileEntry !TarEntryOffset
                    | TarDir [FilePath]
   deriving (Show, Typeable)
@@ -78,32 +82,48 @@ newtype PathComponentId = PathComponentId Int
 type TarEntryOffset = Int
 
 tarIndexVersion :: Word32
-tarIndexVersion = 0
+tarIndexVersion = 2
 
 tarIndexInfoStr :: String
 tarIndexInfoStr = "This file brought to you by tarindex, version " ++ showVersion version
 
 -- | One-stop shop for reading using a tar index
-index :: TarIndex -- ^ Tar Index
-      -> FilePath -- ^ Entry to read in index
-      -> FilePath -- ^ Path to tar file
-      -> IO (Either [FilePath] BS.ByteString)
-index tIndex entryPath tarFile
+indexFile
+    :: TarIndex -- ^ Tar Index
+    -> FilePath -- ^ Entry to read in index
+    -> FilePath -- ^ Path to tar file
+    -> IO (Either [FilePath] BSL.ByteString)
+indexFile tIndex entryPath tarFile
     = case lookup tIndex entryPath of
         Nothing -> return $ Left []
         Just (TarDir paths) -> return $ Left paths
-        Just (TarFileEntry offset) -> Right <$> indexFile tarFile offset
+        Just (TarFileEntry offset) -> Right <$> indexFileEntry tarFile offset
 
-indexFile :: FilePath -> TarEntryOffset -> IO BS.ByteString
-indexFile tarfile off
+indexFileEntry :: FilePath -> TarEntryOffset -> IO BSL.ByteString
+indexFileEntry tarfile off
     = do
   htar <- openFile tarfile ReadMode
   hSeek htar AbsoluteSeek (fromIntegral (off * 512))
-  header <- BS.hGet htar 512
+  header <- BSL.hGet htar 512
   case Tar.read header of
     (Tar.Next Tar.Entry{Tar.entryContent = Tar.NormalFile _ size} _) -> 
-        BS.hGetSomeContents htar (fromIntegral size)
+        BSL.hGetSomeContents htar (fromIntegral size)
     _ -> hClose htar >> fail "error indexing from tar file"
+
+indexBSEntry :: BS.ByteString -> TarEntryOffset -> BSL.ByteString
+indexBSEntry tarbytes off
+    = let entryBytes = BS.drop (off * 512) $ tarbytes
+      in case Tar.read (BSL.fromChunks [entryBytes]) of
+    (Tar.Next Tar.Entry{Tar.entryContent = Tar.NormalFile body size} _) -> 
+        body
+    _ -> error "error indexing from tar file"
+
+index :: TarIndex -> FilePath -> BS.ByteString -> Maybe (Either [FilePath] BSL.ByteString)
+index tIndex entryPath tarBytes
+    = case lookup tIndex entryPath of
+        Nothing -> Nothing
+        Just (TarDir paths) -> Just $ Left paths
+        Just (TarFileEntry offset) -> Just $ Right $ indexBSEntry tarBytes offset
 
 -- | Serialize a tar index.
 putTarIndex :: TarIndex -> Put
@@ -115,7 +135,9 @@ putTarIndex (TarIndex table trie)
       , IntTrie.putTrie trie  -- trie
       ]
 
--- | De-serialize a tar index. May fail on version mismatch.
+-- | De-serialize a tar index. May fail on version mismatch. When this function
+-- returns in 'Left' we do not consume the rest of the bytes associated with the
+-- index.
 getTarIndex :: Get (Either String TarIndex)
 getTarIndex = do
   ver <- get
@@ -146,7 +168,7 @@ lookup (TarIndex pathTable pathTrie) path =
 -- Failure is indicated by throwing an error.
 constructIO :: FilePath -> IO TarIndex
 constructIO file = do
-  tar <- BS.readFile file
+  tar <- BSL.readFile file
   let entries = Tar.read tar
   case extractInfo entries of
     info -> evaluate (construct info)
