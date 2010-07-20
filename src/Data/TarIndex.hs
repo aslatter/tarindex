@@ -11,7 +11,6 @@ module Data.TarIndex (
     construct,
     constructIO,
     index,
-    indexFile,
 
     putTarIndex,
     getTarIndex,
@@ -24,25 +23,21 @@ module Data.TarIndex (
 import Prelude hiding (lookup)
 
 import qualified Codec.Archive.Tar as Tar
-import qualified Codec.Archive.Tar.Entry as Tar
 import Control.Applicative
 import Control.Exception (evaluate)
 import Data.Binary
 import Data.Bits (shiftL)
 import qualified Data.ByteString.Lazy as BSL
-import qualified Data.ByteString.Lazy.Util as BSL
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS.Char8
 import Data.Typeable (Typeable)
 import Data.Version (showVersion)
-import System.IO
 import qualified System.FilePath as FilePath
 
 import qualified Data.StringTable as StringTable
 import Data.StringTable (StringTable)
 import qualified Data.IntTrie as IntTrie
 import Data.IntTrie (IntTrie)
-import Numeric (readOct)
 import Paths (version)
 
 -- | An index of the entries in a tar file. This lets us look up a filename
@@ -90,29 +85,17 @@ tarIndexVersion = 2
 tarIndexInfoStr :: String
 tarIndexInfoStr = "This file brought to you by tarindex, version " ++ showVersion version
 
--- | One-stop shop for reading using a tar index
-indexFile
-    :: TarIndex -- ^ Tar Index
-    -> FilePath -- ^ Entry to read in index
-    -> FilePath -- ^ Path to tar file
-    -> IO (Either [FilePath] BSL.ByteString)
-indexFile tIndex entryPath tarFile
+
+-- | Perfect for memory mapped tar files!
+index :: TarIndex -> FilePath -> BS.ByteString -> Maybe (Either [FilePath] BSL.ByteString)
+index tIndex entryPath tarBytes
     = case lookup tIndex entryPath of
-        Nothing -> return $ Left []
-        Just (TarDir paths) -> return $ Left paths
-        Just (TarFileEntry offset) -> Right <$> indexFileEntry tarFile offset
+        Nothing -> Nothing
+        Just (TarDir paths) -> Just $ Left paths
+        Just (TarFileEntry offset) -> Just $ Right $ indexBSEntry tarBytes offset
 
-indexFileEntry :: FilePath -> TarEntryOffset -> IO BSL.ByteString
-indexFileEntry tarfile off
-    = do
-  htar <- openFile tarfile ReadMode
-  hSeek htar AbsoluteSeek (fromIntegral (off * 512))
-  header <- BSL.hGet htar 512
-  case Tar.read header of
-    (Tar.Next Tar.Entry{Tar.entryContent = Tar.NormalFile _ size} _) -> 
-        BSL.hGetSomeContents htar (fromIntegral size)
-    _ -> hClose htar >> fail "error indexing from tar file"
-
+-- TODO propagate errors further out - calls to 'error' should be done
+-- at the highest level possible
 indexBSEntry :: BS.ByteString -> TarEntryOffset -> BSL.ByteString
 indexBSEntry tarbytes off
     = let entryBytes = BS.drop (off * 512) $ tarbytes
@@ -120,7 +103,7 @@ indexBSEntry tarbytes off
            Left err -> error $ "error indexing from tar file: " ++ err
            Right size -> BSL.fromChunks [BS.take size $ BS.drop 512 entryBytes]
 
--- shamelessly copied from Distribution.Client.Tar
+-- shamelessly copied (+ tweaks) from Distribution.Client.Tar
 
 getOct :: Int -> Int -> BS.ByteString -> Either String Int
 getOct off len header
@@ -148,33 +131,33 @@ getOct off len header
               + shiftL (fromIntegral byte0) 0
     parseBinInt _ = Left "tar header uses non-standard number encoding"
 
+-- some sort of zip and sum might be quicker, but this is
+-- conceptually simple once the error handling is added in
 readOctBytes :: BS.ByteString -> Maybe Int
 readOctBytes = BS.Char8.foldl' go (Just 0)
  where go Nothing _ = Nothing
-       go (Just acc) char = let next
-                                  = case char of
-                                      '0' -> 0
-                                      '1' -> 1
-                                      '2' -> 2
-                                      '3' -> 3
-                                      '4' -> 4
-                                      '5' -> 5
-                                      '6' -> 6
-                                      '7' -> 7
-                                      _   -> 8
-                            in if next > 7 then Nothing else Just (next + acc * 8)
+       go (Just acc) char
+           | next > 7  = Nothing
+           | otherwise
+               = let x = next + acc * 8
+                 in x `seq` Just x 
+        where next
+               = case char of
+                  '0' -> 0
+                  '1' -> 1
+                  '2' -> 2
+                  '3' -> 3
+                  '4' -> 4
+                  '5' -> 5
+                  '6' -> 6
+                  '7' -> 7
+                  _   -> 8
 
 getBytes :: Int -> Int -> BS.ByteString -> BS.ByteString
 getBytes off len = BS.take len . BS.drop off
 
 -- end shameless copying
 
-index :: TarIndex -> FilePath -> BS.ByteString -> Maybe (Either [FilePath] BSL.ByteString)
-index tIndex entryPath tarBytes
-    = case lookup tIndex entryPath of
-        Nothing -> Nothing
-        Just (TarDir paths) -> Just $ Left paths
-        Just (TarFileEntry offset) -> Just $ Right $ indexBSEntry tarBytes offset
 
 -- | Serialize a tar index.
 putTarIndex :: TarIndex -> Put

@@ -18,8 +18,7 @@ Cabal-version:       >=1.2
 Library
   Exposed-modules:     Data.TarIndex
   Build-depends:       base >= 3 && < 4.3, filepath, array, bytestring, binary == 0.5.*, tar == 0.3.*
-  Other-modules:       Data.ByteString.Lazy.Util
-                       Data.IntTrie
+  Other-modules:       Data.IntTrie
                        Data.StringTable
                        Paths
                        Paths_tarindex
