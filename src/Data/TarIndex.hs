@@ -28,9 +28,11 @@ import qualified Codec.Archive.Tar.Entry as Tar
 import Control.Applicative
 import Control.Exception (evaluate)
 import Data.Binary
+import Data.Bits (shiftL)
 import qualified Data.ByteString.Lazy as BSL
 import qualified Data.ByteString.Lazy.Util as BSL
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Char8 as BS.Char8
 import Data.Typeable (Typeable)
 import Data.Version (showVersion)
 import System.IO
@@ -40,6 +42,7 @@ import qualified Data.StringTable as StringTable
 import Data.StringTable (StringTable)
 import qualified Data.IntTrie as IntTrie
 import Data.IntTrie (IntTrie)
+import Numeric (readOct)
 import Paths (version)
 
 -- | An index of the entries in a tar file. This lets us look up a filename
@@ -113,10 +116,58 @@ indexFileEntry tarfile off
 indexBSEntry :: BS.ByteString -> TarEntryOffset -> BSL.ByteString
 indexBSEntry tarbytes off
     = let entryBytes = BS.drop (off * 512) $ tarbytes
-      in case Tar.read (BSL.fromChunks [entryBytes]) of
-    (Tar.Next Tar.Entry{Tar.entryContent = Tar.NormalFile body size} _) -> 
-        body
-    _ -> error "error indexing from tar file"
+      in case getOct 124 12 entryBytes of
+           Left err -> error $ "error indexing from tar file: " ++ err
+           Right size -> BSL.fromChunks [BS.take size $ BS.drop 512 entryBytes]
+
+-- shamelessly copied from Distribution.Client.Tar
+
+getOct :: Int -> Int -> BS.ByteString -> Either String Int
+getOct off len header
+  | BS.head bytes == 128 = parseBinInt (BS.unpack (BS.tail bytes))
+  | BS.null octstr          = Right 0
+  | otherwise            = case readOctBytes octstr of
+               Just x -> Right x
+               _      -> Left "tar header is malformed (bad numeric encoding)"
+  where
+    bytes  = getBytes off len header
+    octstr = {- BS.Char8.unpack . -}
+           BS.Char8.takeWhile (\c -> c /= '\NUL' && c /= ' ') .
+           BS.Char8.dropWhile (== ' ')
+           $ bytes
+
+    -- Some tar programs switch into a binary format when they try to represent
+    -- field values that will not fit in the required width when using the text
+    -- octal format. In particular, the UID/GID fields can only hold up to 2^21
+    -- while in the binary format can hold up to 2^32. The binary format uses
+    -- '\128' as the header which leaves 7 bytes. Only the last 4 are used.
+    parseBinInt [0, 0, 0, byte3, byte2, byte1, byte0] =
+      Right $! shiftL (fromIntegral byte3) 24
+              + shiftL (fromIntegral byte2) 16
+              + shiftL (fromIntegral byte1) 8
+              + shiftL (fromIntegral byte0) 0
+    parseBinInt _ = Left "tar header uses non-standard number encoding"
+
+readOctBytes :: BS.ByteString -> Maybe Int
+readOctBytes = BS.Char8.foldl' go (Just 0)
+ where go Nothing _ = Nothing
+       go (Just acc) char = let next
+                                  = case char of
+                                      '0' -> 0
+                                      '1' -> 1
+                                      '2' -> 2
+                                      '3' -> 3
+                                      '4' -> 4
+                                      '5' -> 5
+                                      '6' -> 6
+                                      '7' -> 7
+                                      _   -> 8
+                            in if next > 7 then Nothing else Just (next + acc * 8)
+
+getBytes :: Int -> Int -> BS.ByteString -> BS.ByteString
+getBytes off len = BS.take len . BS.drop off
+
+-- end shameless copying
 
 index :: TarIndex -> FilePath -> BS.ByteString -> Maybe (Either [FilePath] BSL.ByteString)
 index tIndex entryPath tarBytes
